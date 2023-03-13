@@ -206,6 +206,7 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
       data_bank(w).io.r.req.valid := io.r.en
       data_bank(w).io.r.req.bits.apply(setIdx = io.r.addr)
     }
+    XSPerfAccumulate("data_read_counter", PopCount(Cat(data_bank.map(_.io.r.req.valid))))
 
     val half = nWays / 2
     val data_read = data_bank.map(_.io.r.resp.data(0))
