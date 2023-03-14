@@ -24,6 +24,13 @@ object ReplayCarry{
     rcry.valid := v
     rcry
   }
+
+  def init(implicit p: Parameters): ReplayCarry = {
+    val rcry = Wire(new ReplayCarry)
+    rcry.real_way_en := 0.U
+    rcry.valid := false.B
+    rcry
+  }
 }
 
 class WPUReq(implicit p: Parameters) extends WPUBuddle {
