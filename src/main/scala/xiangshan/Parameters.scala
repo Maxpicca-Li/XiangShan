@@ -182,8 +182,8 @@ case class XSCoreParameters
   ),
   dwpuParameters: WPUParameters = WPUParameters(
     enWPU = true,
-    algoName = "utag",
-    enCfPred = false,
+    algoName = "mmru",
+    enCfPred = true,
     isICache = false,
   ),
   itlbParameters: TLBParameters = TLBParameters(
