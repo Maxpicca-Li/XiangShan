@@ -30,7 +30,7 @@ import device.RAMHelper
 import huancun.{AliasField, AliasKey, DirtyField, PreferCacheField, PrefetchField}
 import utility.FastArbiter
 import mem.AddPipelineReg
-import xiangshan.cache.dcache.{ReplayCarry, VictimList}
+import xiangshan.cache.wpu.{ReplayCarry, VictimList}
 
 import scala.math.max
 
@@ -313,7 +313,7 @@ class DCacheWordReq(implicit p: Parameters)  extends DCacheBundle
   val id     = UInt(reqIdWidth.W)
   val instrtype   = UInt(sourceTypeWidth.W)
   val isFirstIssue = Bool()
-  val replayCarry = new ReplayCarry
+  val replayCarry = new ReplayCarry(nWays)
 
   val debug_robIdx = UInt(log2Ceil(RobSize).W)
   def dump() = {
@@ -354,7 +354,7 @@ class BaseDCacheWordResp(implicit p: Parameters) extends DCacheBundle
   val miss   = Bool()
   // cache miss, and failed to enter the missqueue, replay from RS is needed
   val replay = Bool()
-  val replayCarry = new ReplayCarry
+  val replayCarry = new ReplayCarry(nWays)
   // data has been corrupted
   val tag_error = Bool() // tag error
   val mshr_id = UInt(log2Up(cfg.nMissEntries).W)
@@ -439,7 +439,7 @@ class UncacheWordReq(implicit p: Parameters) extends DCacheBundle
   val instrtype = UInt(sourceTypeWidth.W)
   val atomic = Bool()
   val isFirstIssue = Bool()
-  val replayCarry = new ReplayCarry
+  val replayCarry = new ReplayCarry(nWays)
 
   def dump() = {
     XSDebug("UncacheWordReq: cmd: %x addr: %x data: %x mask: %x id: %d\n",
@@ -456,7 +456,7 @@ class UncacheWorResp(implicit p: Parameters) extends DCacheBundle
   val replay    = Bool()
   val tag_error = Bool()
   val error     = Bool()
-  val replayCarry = new ReplayCarry
+  val replayCarry = new ReplayCarry(nWays)
   val mshr_id = UInt(log2Up(cfg.nMissEntries).W)  // FIXME: why uncacheWordResp is not merged to baseDcacheResp
 
   val debug_robIdx = UInt(log2Ceil(RobSize).W)
@@ -704,13 +704,13 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   println("  DCacheSetOffset: " + DCacheSetOffset)
   println("  DCacheTagOffset: " + DCacheTagOffset)
   println("  DCacheAboveIndexOffset: " + DCacheAboveIndexOffset)
-  println("  WPUEnable: " + wpuParam.enWPU)
-  println("  WPUEnableCfPred: " + wpuParam.enCfPred)
-  println("  WPUAlgorithm: " + wpuParam.algoName)
+  println("  WPUEnable: " + dwpuParam.enWPU)
+  println("  WPUEnableCfPred: " + dwpuParam.enCfPred)
+  println("  WPUAlgorithm: " + dwpuParam.algoName)
 
   //----------------------------------------
   // core data structures
-  val bankedDataArray = if(wpuParam.enWPU) Module(new SramedDataArray) else Module(new BankedDataArray)
+  val bankedDataArray = if(dwpuParam.enWPU) Module(new SramedDataArray) else Module(new BankedDataArray)
   val metaArray = Module(new L1CohMetaArray(readPorts = LoadPipelineWidth + 1, writePorts = 2))
   val errorArray = Module(new L1FlagMetaArray(readPorts = LoadPipelineWidth + 1, writePorts = 2))
   val prefetchArray = Module(new L1FlagMetaArray(readPorts = LoadPipelineWidth + 1, writePorts = 2)) // prefetch flag array
@@ -1099,7 +1099,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   val replWayReqs = ldu.map(_.io.replace_way) ++ Seq(mainPipe.io.replace_way)
 
   val victimList = VictimList(nSets)
-  if (wpuParam.enCfPred) {
+  if (dwpuParam.enCfPred) {
     when(missQueue.io.replace_pipe_req.valid) {
       victimList.replace(get_idx(missQueue.io.replace_pipe_req.bits.vaddr))
     }

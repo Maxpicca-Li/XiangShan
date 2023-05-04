@@ -28,6 +28,7 @@ class ICacheReadBundle(implicit p: Parameters) extends ICacheBundle
 {
   val isDoubleLine  = Bool()
   val vSetIdx       = Vec(2,UInt(log2Ceil(nSets).W))
+  val way_en = Vec(PortNumber, UInt(nWays.W))
 
   def port_0_read_0 =  !vSetIdx(0)(0)
   def port_0_read_1 =   vSetIdx(0)(0)
@@ -50,13 +51,15 @@ class ICacheMetaRespBundle(implicit p: Parameters) extends ICacheBundle
 
 class ICacheMetaWriteBundle(implicit p: Parameters) extends ICacheBundle
 {
+  val vaddr = UInt(VAddrBits.W)
   val virIdx  = UInt(idxBits.W)
   val phyTag  = UInt(tagBits.W)
   val coh     = new ClientMetadata
   val waymask = UInt(nWays.W)
   val bankIdx = Bool()
 
-  def generate(tag:UInt, coh: ClientMetadata, idx:UInt, waymask:UInt, bankIdx: Bool){
+  def generate(vaddr: UInt, tag:UInt, coh: ClientMetadata, idx:UInt, waymask:UInt, bankIdx: Bool){
+    this.vaddr := vaddr
     this.virIdx  := idx
     this.phyTag  := tag
     this.coh     := coh
@@ -86,8 +89,8 @@ class ICacheDataWriteBundle(implicit p: Parameters) extends ICacheBundle
 
 class ICacheDataRespBundle(implicit p: Parameters) extends ICacheBundle
 {
-  val datas = Vec(2, Vec(nWays,  UInt(blockBits.W)))
-  val codes = Vec(2, Vec(nWays , UInt(dataCodeEntryBits.W)))
+  val datas = Vec(PortNumber, Vec(nWays,  UInt(blockBits.W)))
+  val codes = Vec(PortNumber, Vec(nWays,  UInt(dataCodeEntryBits.W)))
 }
 
 class ICacheMetaReadBundle(implicit p: Parameters) extends ICacheBundle

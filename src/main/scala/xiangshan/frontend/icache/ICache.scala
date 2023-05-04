@@ -29,7 +29,8 @@ import xiangshan.cache._
 import utils._
 import utility._
 import xiangshan.backend.fu.PMPReqBundle
-import xiangshan.cache.mmu.{TlbRequestIO, TlbReq}
+import xiangshan.cache.mmu.{TlbReq, TlbRequestIO}
+import xiangshan.cache.wpu.ICacheWpuWrapper
 
 case class ICacheParameters(
     nSets: Int = 256,
@@ -72,6 +73,7 @@ trait HasICacheParameters extends HasL1CacheParameters with HasInstrMMIOConst wi
 
   val ICacheSets = cacheParams.nSets
   val ICacheWays = cacheParams.nWays
+  val ICacheBanks = 2
 
   val ICacheSameVPAddrLength = 12
   val ReplaceIdWid = 5
@@ -113,8 +115,31 @@ trait HasICacheParameters extends HasL1CacheParameters with HasInstrMMIOConst wi
 abstract class ICacheBundle(implicit p: Parameters) extends XSBundle
   with HasICacheParameters
 
-abstract class ICacheModule(implicit p: Parameters) extends XSModule
-  with HasICacheParameters
+abstract class ICacheModule(implicit p: Parameters) extends XSModule with HasICacheParameters{
+  def get_dataline_errors(datas: Vec[Vec[UInt]], errors: Vec[Vec[UInt]], s1_fire: Bool): Bool = {
+    val data_errors = Wire(Vec(nWays, Bool()))
+    val read_datas = datas.asTypeOf(Vec(nWays, Vec(dataCodeUnitNum, UInt(dataCodeUnit.W))))
+    val read_codes = errors.asTypeOf(Vec(nWays, Vec(dataCodeUnitNum, UInt(dataCodeBits.W))))
+    val data_full_wayBits = VecInit((0 until nWays).map(w =>
+      VecInit((0 until dataCodeUnitNum).map(u =>
+        Cat(read_codes(w)(u), read_datas(w)(u))))))
+    val data_error_wayBits = VecInit((0 until nWays).map(w =>
+      VecInit((0 until dataCodeUnitNum).map(u =>
+        cacheParams.dataCode.decode(data_full_wayBits(w)(u)).error))))
+    (0 until nWays).map { w => data_errors(w) := RegNext(RegNext(s1_fire)) && RegNext(data_error_wayBits(w)).reduce(_ || _) }
+    data_errors.reduce(_ || _)
+  }
+
+  def get_data_errors(datas: UInt, errors: UInt, s1_fire: Bool): Bool = {
+    val data_errors = Wire(Bool())
+    val read_datas = datas.asTypeOf(Vec(dataCodeUnitNum, UInt(dataCodeUnit.W)))
+    val read_codes = errors.asTypeOf(Vec(dataCodeUnitNum, UInt(dataCodeBits.W)))
+    val data_full_wayBits = VecInit((0 until dataCodeUnitNum).map(u => Cat(read_codes(u), read_datas(u))))
+    val data_error_wayBits = VecInit((0 until dataCodeUnitNum).map(u => cacheParams.dataCode.decode(data_full_wayBits(u)).error))
+    data_errors := RegNext(RegNext(s1_fire)) && RegNext(data_error_wayBits).reduce(_ || _)
+    data_errors
+  }
+}
 
 abstract class ICacheArray(implicit p: Parameters) extends XSModule
   with HasICacheParameters
@@ -167,7 +192,7 @@ class ICacheMetaArray()(implicit p: Parameters) extends ICacheArray
   val write_bank_1 = io.write.valid &&  io.write.bits.bankIdx
 
   val write_meta_bits = Wire(UInt(metaEntryBits.W))
-
+  val tag_read_oh = WireInit(VecInit(Seq.fill(2)(0.U(XLEN.W))))
   val tagArrays = (0 until 2) map { bank =>
     val tagArray = Module(new SRAMTemplate(
       UInt(metaEntryBits.W),
@@ -191,9 +216,10 @@ class ICacheMetaArray()(implicit p: Parameters) extends ICacheArray
       tagArray.io.w.req.valid := write_bank_1
       tagArray.io.w.req.bits.apply(data=write_meta_bits, setIdx=io.write.bits.virIdx(highestIdxBit,1), waymask=io.write.bits.waymask)
     }
-
+    tag_read_oh(bank) := PopCount(tagArray.io.r.req.valid) // PopCount(Fill(nWays, tagArray.io.r.req.valid))
     tagArray
   }
+  XSPerfAccumulate("tag_read_counter", tag_read_oh.reduce(_ + _))
 
   io.read.ready := !io.write.valid && tagArrays.map(_.io.r.req.ready).reduce(_&&_)
 
@@ -315,6 +341,13 @@ class ICacheDataArray(implicit p: Parameters) extends ICacheArray
   val bank_0_idx_vec = io.read.bits.map(copy =>  Mux(io.read.valid && copy.port_0_read_0, copy.vSetIdx(0), copy.vSetIdx(1)))
   val bank_1_idx_vec = io.read.bits.map(copy =>  Mux(io.read.valid && copy.port_0_read_1, copy.vSetIdx(0), copy.vSetIdx(1)))
 
+  // same bank but different way
+  val bank_read_way_en = VecInit(0.U(nWays.W), 0.U(nWays.W))
+  // s0
+  bank_read_way_en(0) := (Fill(nWays, io.read.bits.head.port_0_read_0) & io.read.bits.head.way_en(0)) | (Fill(nWays, io.read.bits.head.port_1_read_0) & io.read.bits.head.way_en(1))
+  bank_read_way_en(1) := (Fill(nWays, io.read.bits.head.port_0_read_1) & io.read.bits.head.way_en(0)) | (Fill(nWays, io.read.bits.head.port_1_read_1) & io.read.bits.head.way_en(1))
+  val bank_read_way_en_reg = RegEnable(next = bank_read_way_en, enable = io.read.fire())
+
   val dataArrays = (0 until partWayNum).map{ i =>
     val dataArray = Module(new ICachePartWayArray(
       UInt(blockBits.W),
@@ -323,8 +356,10 @@ class ICacheDataArray(implicit p: Parameters) extends ICacheArray
 
     dataArray.io.read.req(0).valid :=  io.read.bits(i).read_bank_0 && io.read.valid
     dataArray.io.read.req(0).bits.ridx := bank_0_idx_vec(i)(highestIdxBit,1)
+    dataArray.io.read.req(0).bits.rmask := bank_read_way_en(0).asTypeOf(Vec(partWayNum, Vec(pWay, Bool())))(i)
     dataArray.io.read.req(1).valid := io.read.bits(i).read_bank_1 && io.read.valid
     dataArray.io.read.req(1).bits.ridx := bank_1_idx_vec(i)(highestIdxBit,1)
+    dataArray.io.read.req(1).bits.rmask := bank_read_way_en(1).asTypeOf(Vec(partWayNum, Vec(pWay, Bool())))(i)
 
 
     dataArray.io.write.valid         := io.write.valid
@@ -343,10 +378,8 @@ class ICacheDataArray(implicit p: Parameters) extends ICacheArray
       read_datas(port)(w) := dataArrays(w / pWay).io.read.resp.rdata(port).asTypeOf(Vec(pWay, UInt(blockBits.W)))(w % pWay)
     }
   }
-
-  io.readResp.datas(0) := Mux( port_0_read_1_reg, read_datas(1) , read_datas(0))
-  io.readResp.datas(1) := Mux( port_1_read_0_reg, read_datas(0) , read_datas(1))
-
+  io.readResp.datas(0) := Mux(port_0_read_1_reg, read_datas(1), read_datas(0))
+  io.readResp.datas(1) := Mux(port_1_read_0_reg, read_datas(0), read_datas(1))
 
   val write_data_code = Wire(UInt(dataCodeEntryBits.W))
   val write_bank_0 = WireInit(io.write.valid && !io.write.bits.bankIdx)
@@ -355,7 +388,8 @@ class ICacheDataArray(implicit p: Parameters) extends ICacheArray
   val bank_0_idx = bank_0_idx_vec.last
   val bank_1_idx = bank_1_idx_vec.last
 
-  val codeArrays = (0 until 2) map { i => 
+  // FIXME lyq: can not change the access?
+  val codeArrays = (0 until 2) map { i =>
     val codeArray = Module(new SRAMTemplate(
       UInt(dataCodeEntryBits.W),
       set=nSets/2,
@@ -377,10 +411,10 @@ class ICacheDataArray(implicit p: Parameters) extends ICacheArray
       codeArray.io.w.req.valid := write_bank_1
       codeArray.io.w.req.bits.apply(data=write_data_code, setIdx=io.write.bits.virIdx(highestIdxBit,1), waymask=io.write.bits.waymask)
     }
-    
+
     codeArray
   }
-  
+
   io.read.ready := !io.write.valid &&
                     dataArrays.map(_.io.read.req.map(_.ready).reduce(_&&_)).reduce(_&&_) &&
                     codeArrays.map(_.io.r.req.ready).reduce(_ && _)
@@ -389,16 +423,15 @@ class ICacheDataArray(implicit p: Parameters) extends ICacheArray
   val read_codes = Wire(Vec(2,Vec(nWays,UInt(dataCodeEntryBits.W) )))
   for(((dataArray,codeArray),i) <- dataArrays.zip(codeArrays).zipWithIndex){
     read_codes(i) := codeArray.io.r.resp.asTypeOf(Vec(nWays,UInt(dataCodeEntryBits.W)))
-  } 
+  }
+  io.readResp.codes(0) := Mux(port_0_read_1_reg, read_codes(1), read_codes(0))
+  io.readResp.codes(1) := Mux(port_1_read_0_reg, read_codes(0), read_codes(1))
 
   //Parity Encode
   val write = io.write.bits
   val write_data = WireInit(write.data)
   write_data_code := getECCFromBlock(write_data).asUInt
   write_data_bits := write_data
-
-  io.readResp.codes(0) := Mux( port_0_read_1_reg, read_codes(1) , read_codes(0))
-  io.readResp.codes(1) := Mux( port_1_read_0_reg, read_codes(0) , read_codes(1))
 
   io.write.ready := true.B
 
@@ -417,6 +450,7 @@ class ICacheDataArray(implicit p: Parameters) extends ICacheArray
         dataArrays(i).io.read.req.zipWithIndex.map{ case(port,i) =>
           if(i ==0) port.valid     := !io.cacheOp.req.bits.bank_num(0)
           else      port.valid     :=  io.cacheOp.req.bits.bank_num(0)
+          port.bits.rmask := UIntToOH(io.cacheOp.req.bits.wayNum, 8).asTypeOf(Vec(partWayNum, Vec(pWay, Bool())))(i)
           port.bits.ridx := io.cacheOp.req.bits.index(highestIdxBit,1)
         }
       }
@@ -441,6 +475,19 @@ class ICacheDataArray(implicit p: Parameters) extends ICacheArray
   for (wordIndex <- 0 until numICacheLineWords) {
     io.cacheOp.resp.bits.read_data_vec(wordIndex) := dataresp(io.cacheOp.req.bits.wayNum(4, 0))(64*(wordIndex+1)-1, 64*wordIndex)
   }
+
+  val data_read_oh = WireInit(VecInit(Seq.fill(partWayNum * 2)(0.U(XLEN.W))))
+  for(i <- 0 until partWayNum){
+    data_read_oh(i) := 0.U(2.W)
+    data_read_oh(partWayNum + i) := 0.U(2.W)
+    when(dataArrays(i).io.read.req(0).valid) {
+      data_read_oh(i) := PopCount(Cat(dataArrays(i).io.read.req(0).bits.rmask).asUInt)
+    }
+    when(dataArrays(i).io.read.req(1).valid) {
+      data_read_oh(partWayNum + i) := PopCount(Cat(dataArrays(i).io.read.req(1).bits.rmask).asUInt)
+    }
+  }
+  XSPerfAccumulate("data_read_counter", data_read_oh.reduce(_ + _))
 
 }
 
@@ -489,9 +536,12 @@ class ICacheImp(outer: ICache) extends LazyModuleImp(outer) with HasICacheParame
   println("  ICacheWays: "          + cacheParams.nWays)
   println("  ICacheBanks: "         + PortNumber)
   println("  hasPrefetch: "         + cacheParams.hasPrefetch)
-  if(cacheParams.hasPrefetch){
-    println("  nPrefetchEntries: "         + cacheParams.nPrefetchEntries)
-  }
+if(cacheParams.hasPrefetch){
+  println("  nPrefetchEntries: "         + cacheParams.nPrefetchEntries)
+}
+  println("  WPUEnable: " + iwpuParam.enWPU)
+  println("  WPUEnableCfPred: " + iwpuParam.enCfPred)
+  println("  WPUAlgorithm: " + iwpuParam.algoName)
 
   val (bus, edge) = outer.clientNode.out.head
 
@@ -504,26 +554,50 @@ class ICacheImp(outer: ICache) extends LazyModuleImp(outer) with HasICacheParame
   val probeQueue     = Module(new ICacheProbeQueue(edge))
   val prefetchPipe    = Module(new IPrefetchPipe)
 
-  val meta_read_arb   = Module(new Arbiter(new ICacheReadBundle,  3))
-  val data_read_arb   = Module(new Arbiter(Vec(partWayNum, new ICacheReadBundle),  2))
+  val meta_read_arb   = Module(new Arbiter(new ICacheReadBundle,  5))
+  val data_read_arb   = Module(new Arbiter(Vec(partWayNum, new ICacheReadBundle),  4))
   val meta_write_arb  = Module(new Arbiter(new ICacheMetaWriteBundle(),  2 ))
   val replace_req_arb = Module(new Arbiter(new ReplacePipeReq, 2))
   // val tlb_req_arb     = Module(new Arbiter(new TlbReq, 2))
 
-  meta_read_arb.io.in(ReplacePipeKey)   <> replacePipe.io.meta_read
-  meta_read_arb.io.in(MainPipeKey)      <> mainPipe.io.metaArray.toIMeta
-  meta_read_arb.io.in(2)                <> prefetchPipe.io.toIMeta
-  metaArray.io.read                     <> meta_read_arb.io.out
+  meta_read_arb.io.in(0) <> replacePipe.io.re_meta_read
+  meta_read_arb.io.in(1) <> replacePipe.io.meta_read
+  meta_read_arb.io.in(2) <> mainPipe.io.reMetaArray.toIMeta
+  meta_read_arb.io.in(3) <> mainPipe.io.metaArray.toIMeta
+  meta_read_arb.io.in(4) <> prefetchPipe.io.toIMeta
+  metaArray.io.read <> meta_read_arb.io.out
 
+  replacePipe.io.re_meta_response <> metaArray.io.readResp
+  mainPipe.io.reMetaArray.fromIMeta <> metaArray.io.readResp
   replacePipe.io.meta_response          <> metaArray.io.readResp
   mainPipe.io.metaArray.fromIMeta       <> metaArray.io.readResp
   prefetchPipe.io.fromIMeta             <> metaArray.io.readResp
 
-  data_read_arb.io.in(ReplacePipeKey) <> replacePipe.io.data_read
-  data_read_arb.io.in(MainPipeKey)    <> mainPipe.io.dataArray.toIData
+  data_read_arb.io.in(0) <> replacePipe.io.re_data_read
+  data_read_arb.io.in(1) <> replacePipe.io.data_read
+  data_read_arb.io.in(2) <> mainPipe.io.reDataArray.toIData
+  data_read_arb.io.in(3) <> mainPipe.io.dataArray.toIData
   dataArray.io.read                   <> data_read_arb.io.out
+  replacePipe.io.re_data_response     <> dataArray.io.readResp
   replacePipe.io.data_response        <> dataArray.io.readResp
+  mainPipe.io.reDataArray.fromIData   <> dataArray.io.readResp
   mainPipe.io.dataArray.fromIData     <> dataArray.io.readResp
+
+  /** wpu: unified predict */
+  val iwpu = Module(new ICacheWpuWrapper(PortNumber + 1))
+  for(i <- 0 until PortNumber){
+    iwpu.io.req(i) <> mainPipe.io.iwpu.req(i)
+    iwpu.io.lookup_upd(i) <> mainPipe.io.iwpu.lookup_upd(i)
+    mainPipe.io.iwpu.resp(i) <> iwpu.io.resp(i)
+  }
+  iwpu.io.req(PortNumber) <> replacePipe.io.iwpu.req.head
+  iwpu.io.lookup_upd(PortNumber) <> replacePipe.io.iwpu.lookup_upd.head
+  replacePipe.io.iwpu.resp.head <> iwpu.io.resp(PortNumber)
+  // tag write update
+  iwpu.io.tagwrite_upd <> DontCare
+  iwpu.io.tagwrite_upd.head.valid := metaArray.io.write.valid
+  iwpu.io.tagwrite_upd.head.bits.vaddr := metaArray.io.write.bits.vaddr
+  iwpu.io.tagwrite_upd.head.bits.s1_real_way_en := metaArray.io.write.bits.waymask
 
   mainPipe.io.respStall := io.stop
   io.perfInfo := mainPipe.io.perfInfo
@@ -708,6 +782,7 @@ class ICachePartWayReadBundle[T <: Data](gen: T, pWay: Int)(implicit p: Paramete
 {
   val req = Flipped(Vec(PortNumber, Decoupled(new Bundle{
     val ridx = UInt((log2Ceil(nSets) - 1).W)
+    val rmask = Vec(pWay, Bool())
   })))
   val resp = Output(new Bundle{
     val rdata  = Vec(PortNumber,Vec(pWay, gen))
@@ -733,29 +808,31 @@ class ICachePartWayArray[T <: Data](gen: T, pWay: Int)(implicit p: Parameters) e
   }}
 
   io.read.req.map(_.ready := !io.write.valid)
+  val rmask = (io.read.req.head).bits.rmask
 
   val srams = (0 until PortNumber) map { bank =>
-    val sramBank = Module(new SRAMTemplate(
-      gen,
-      set=nSets/2,
-      way=pWay,
-      shouldReset = true,
-      holdRead = true,
-      singlePort = true
-    ))
+    (0 until pWay) map { way =>
+      val sramBank = Module(new SRAMTemplate(
+        gen,
+        set = nSets / 2,
+        shouldReset = true,
+        holdRead = true,
+        singlePort = true
+      ))
+      sramBank.io.r.req.valid := io.read.req(bank).valid && io.read.req(bank).bits.rmask(way)
+      // sramBank.io.r.req.valid := io.read.req(bank).valid
+      sramBank.io.r.req.bits.apply(setIdx = io.read.req(bank).bits.ridx)
 
-    sramBank.io.r.req.valid := io.read.req(bank).valid
-    sramBank.io.r.req.bits.apply(setIdx= io.read.req(bank).bits.ridx)
-
-    if(bank == 0) sramBank.io.w.req.valid := io.write.valid && !io.write.bits.wbankidx
-    else sramBank.io.w.req.valid := io.write.valid && io.write.bits.wbankidx
-    sramBank.io.w.req.bits.apply(data=io.write.bits.wdata, setIdx=io.write.bits.widx, waymask=io.write.bits.wmask.asUInt())
-
-    sramBank
+      if (bank == 0) sramBank.io.w.req.valid := io.write.valid && !io.write.bits.wbankidx && io.write.bits.wmask(way)
+      else sramBank.io.w.req.valid := io.write.valid && io.write.bits.wbankidx && io.write.bits.wmask(way)
+      sramBank.io.w.req.bits.apply(data = io.write.bits.wdata, setIdx = io.write.bits.widx, waymask = io.write.bits.wmask(way))
+      XSPerfAccumulate("part_data_read_counter", sramBank.io.r.req.valid)
+      sramBank
+    }
   }
 
-  io.read.req.map(_.ready := !io.write.valid && srams.map(_.io.r.req.ready).reduce(_&&_))
+  io.read.req.map(_.ready := !io.write.valid && srams.map{ ways => ways.map(_.io.r.req.ready).reduce(_&&_) }.reduce(_&&_))
 
-  io.read.resp.rdata := VecInit(srams.map(bank => bank.io.r.resp.asTypeOf(Vec(pWay,gen))))
+  io.read.resp.rdata := VecInit(srams.map(bank => VecInit(bank.map(way => way.io.r.resp.data.asTypeOf(gen)))))
 
 }
