@@ -139,9 +139,10 @@ class DCacheWpuWrapper (nPorts: Int = 1) (implicit p:Parameters) extends DCacheM
   wpu.io.updReplaycarry(0) := s1_replay_upd
 
   // replace / tag write
-  wpu.io.updTagwrite(0).en := io.tagwrite_upd.valid
-  wpu.io.updTagwrite(0).vaddr := io.tagwrite_upd.bits.vaddr
-  wpu.io.updTagwrite(0).way_en := io.tagwrite_upd.bits.s1_real_way_en
+  wpu.io.updTagwrite(0) := DontCare
+  // wpu.io.updTagwrite(0).en := io.tagwrite_upd.valid
+  // wpu.io.updTagwrite(0).vaddr := io.tagwrite_upd.bits.vaddr
+  // wpu.io.updTagwrite(0).way_en := io.tagwrite_upd.bits.s1_real_way_en
 
   /** predict and response in s0 */
   io.req.ready := true.B
@@ -211,9 +212,9 @@ class ICacheWpuWrapper (nPorts: Int) (implicit p:Parameters) extends WPUModule w
     // replace / tag write
     wpu.io.updTagwrite := DontCare
   }
-  wpu.io.updTagwrite.head.en := io.tagwrite_upd.head.valid
-  wpu.io.updTagwrite.head.vaddr := io.tagwrite_upd.head.bits.vaddr
-  wpu.io.updTagwrite.head.way_en := io.tagwrite_upd.head.bits.s1_real_way_en
+  // wpu.io.updTagwrite.head.en := io.tagwrite_upd.head.valid
+  // wpu.io.updTagwrite.head.vaddr := io.tagwrite_upd.head.bits.vaddr
+  // wpu.io.updTagwrite.head.way_en := io.tagwrite_upd.head.bits.s1_real_way_en
 
   XSPerfAccumulate("wpu_pred_total", PopCount(io.lookup_upd.map(x => RegNext(x.valid))))
   XSPerfAccumulate("wpu_pred_succ",  PopCount(io.lookup_upd.zipWithIndex.map{case(x, i) => RegNext(x.valid) && !s1_pred_fail(i)}))
