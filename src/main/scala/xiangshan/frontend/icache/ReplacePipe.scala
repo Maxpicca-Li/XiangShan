@@ -45,6 +45,7 @@ class ICacheReplacePipe(implicit p: Parameters) extends ICacheModule{
   val io = IO(new Bundle{
     val pipe_req = Flipped(DecoupledIO(new ReplacePipeReq))
     // val iwpu = Flipped(new IwpuBaseIO(nWays = nWays, nPorts = 1))
+    val tagwriteUpd = Flipped(ValidIO(new WPUUpdate(nWays)))
     val meta_read = DecoupledIO(new ICacheReadBundle)
     val data_read = DecoupledIO(Vec(partWayNum, new ICacheReadBundle))
     val meta_response = Input(new ICacheMetaRespBundle)
@@ -101,7 +102,7 @@ class ICacheReplacePipe(implicit p: Parameters) extends ICacheModule{
 
   val p0_pred_way_en = Wire(UInt(nWays.W))
   val iwpu = Module(new ICacheWpuWrapper(1))
-  iwpu.io.tagwrite_upd <> DontCare
+  iwpu.io.tagwrite_upd <> io.tagwriteUpd
   if (iwpuParam.enWPU) {
     iwpu.io.req(0).valid := r0_valid && r0_req.isProbe
     iwpu.io.req(0).bits.vaddr := r0_req.vaddr

@@ -94,6 +94,7 @@ class ICacheMainPipeInterface(implicit p: Parameters) extends ICacheBundle {
   val reMetaArray = new ICacheMetaReqBundle
   val reDataArray = new ICacheDataReqBundle
   // val iwpu = Flipped(new IwpuBaseIO(nWays = nWays, nPorts = PortNumber))
+  val tagwriteUpd = Flipped(ValidIO(new WPUUpdate(nWays)))
   val mshr        = Vec(PortNumber, new ICacheMSHRBundle)
   val errors      = Output(Vec(PortNumber, new L1CacheErrorInfo))
   /*** outside interface ***/
@@ -164,7 +165,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   val s0_pred_way_en = Wire(Vec(PortNumber, UInt(nWays.W)))
 
   val iwpu = Module(new ICacheWpuWrapper(PortNumber))
-  iwpu.io.tagwrite_upd <> DontCare
+  iwpu.io.tagwrite_upd <> io.tagwriteUpd
   for(i <- 0 until PortNumber){
     if(iwpuParam.enWPU){
       iwpu.io.req(i).valid := s0_final_valid && (if(i==0) true.B else s0_final_double_line)
