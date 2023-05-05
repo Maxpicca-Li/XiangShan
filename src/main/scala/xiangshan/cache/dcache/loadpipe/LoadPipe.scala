@@ -99,24 +99,24 @@ class LoadPipe(id: Int)(implicit p: Parameters) extends DCacheModule with HasPer
   dump_pipeline_reqs("LoadPipe s0", s0_valid, s0_req)
 
   // wpu
-  val wpu = Module(new DCacheWpuWrapper)
+  val dwpu = Module(new DCacheWpuWrapper)
   // req in s0
-  wpu.io.req.bits.vaddr := s0_vaddr
-  wpu.io.req.bits.replayCarry := s0_replayCarry
-  wpu.io.req.valid := s0_valid
+  dwpu.io.req(0).bits.vaddr := s0_vaddr
+  dwpu.io.req(0).bits.replayCarry := s0_replayCarry
+  dwpu.io.req(0).valid := s0_valid
 
   val meta_read = io.meta_read.bits
   val tag_read = io.tag_read.bits
 
   // Tag read for new requests
   meta_read.idx := get_idx(io.lsu.req.bits.addr)
-  // meta_read.way_en := wpu.io.resp.bits.s0_pred_way_en
+  // meta_read.way_en := dwpu.io.resp(0).bits.s0_pred_way_en
   meta_read.way_en := ~0.U(nWays.W)
   // meta_read.tag := DontCare
 
   tag_read.idx := get_idx(io.lsu.req.bits.addr)
   // FIXME lyq: tag read will act on every way, it need to be changed in this experiment
-  // tag_read.way_en := wpu.io.resp.bits.s0_pred_way_en
+  // tag_read.way_en := dwpu.io.resp(0).bits.s0_pred_way_en
   tag_read.way_en := ~0.U(nWays.W)
 
   // --------------------------------------------------------------------------------
@@ -152,29 +152,29 @@ class LoadPipe(id: Int)(implicit p: Parameters) extends DCacheModule with HasPer
   // resp in s1
   val s1_tag_match_way_dup_dc = wayMap((w: Int) => tag_resp(w) === get_tag(s1_paddr_dup_dcache) && meta_resp(w).coh.isValid()).asUInt
   val s1_tag_match_way_dup_lsu = wayMap((w: Int) => tag_resp(w) === get_tag(s1_paddr_dup_lsu) && meta_resp(w).coh.isValid()).asUInt
-  val s1_wpu_pred_valid = RegEnable(wpu.io.resp.valid, s0_fire)
-  val s1_wpu_pred_way_en = RegEnable(wpu.io.resp.bits.s0_pred_way_en, s0_fire)
+  val s1_wpu_pred_valid = RegEnable(dwpu.io.resp(0).valid, s0_fire)
+  val s1_wpu_pred_way_en = RegEnable(dwpu.io.resp(0).bits.s0_pred_way_en, s0_fire)
 
   // lookup update
-  wpu.io.lookup_upd.valid := s1_valid
-  wpu.io.lookup_upd.bits.vaddr := s1_vaddr
-  wpu.io.lookup_upd.bits.s1_real_way_en := s1_tag_match_way_dup_dc
-  wpu.io.lookup_upd.bits.s1_pred_way_en := s1_wpu_pred_way_en
+  dwpu.io.lookup_upd(0).valid := s1_valid
+  dwpu.io.lookup_upd(0).bits.vaddr := s1_vaddr
+  dwpu.io.lookup_upd(0).bits.s1_real_way_en := s1_tag_match_way_dup_dc
+  dwpu.io.lookup_upd(0).bits.s1_pred_way_en := s1_wpu_pred_way_en
   // replace / tag write
   io.vtag_update.ready := true.B
-  wpu.io.tagwrite_upd.valid := io.vtag_update.valid
-  wpu.io.tagwrite_upd.bits.vaddr := io.vtag_update.bits.vaddr
-  wpu.io.tagwrite_upd.bits.s1_real_way_en := io.vtag_update.bits.way_en
+  dwpu.io.tagwrite_upd.valid := io.vtag_update.valid
+  dwpu.io.tagwrite_upd.bits.vaddr := io.vtag_update.bits.vaddr
+  dwpu.io.tagwrite_upd.bits.s1_real_way_en := io.vtag_update.bits.way_en
 
   val s1_wpu_pred_fail = s1_valid && s1_tag_match_way_dup_dc =/= s1_wpu_pred_way_en
   val s1_direct_map_way_num = get_direct_map_way(s1_req.addr)
   if(dwpuParam.enCfPred || !env.FPGAPlatform){
-    wpu.io.cfpred.s0_pc := io.lsu.s0_pc
-    wpu.io.cfpred.s1_pc := io.lsu.s1_pc
+    dwpu.io.cfpred(0).s0_pc := io.lsu.s0_pc
+    dwpu.io.cfpred(0).s1_pc := io.lsu.s1_pc
     // whether direct_map_way miss with valid tag value
-    wpu.io.cfpred.s1_dm_hit := wayMap((w: Int) => w.U === s1_direct_map_way_num && tag_resp(w) === get_tag(s1_paddr_dup_lsu) && meta_resp(w).coh.isValid()).asUInt.orR
+    dwpu.io.cfpred(0).s1_dm_hit := wayMap((w: Int) => w.U === s1_direct_map_way_num && tag_resp(w) === get_tag(s1_paddr_dup_lsu) && meta_resp(w).coh.isValid()).asUInt.orR
   }else{
-    wpu.io.cfpred := DontCare
+    dwpu.io.cfpred(0) := DontCare
   }
 
   val s1_pred_tag_match_way_dup_dc = Wire(UInt(nWays.W))
