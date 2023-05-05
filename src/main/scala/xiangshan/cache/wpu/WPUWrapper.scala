@@ -165,11 +165,11 @@ class DCacheWpuWrapper (nPorts: Int = 1) (implicit p:Parameters) extends DCacheM
 
   // PerfLog
   // pred situation
-  XSPerfAccumulate("wpu_pred_total", PopCount((0 until nPorts).map(i => s1_lookup_valid(i))))
-  XSPerfAccumulate("wpu_pred_succ", PopCount((0 until nPorts).map(i => s1_lookup_valid(i) && !s1_pred_fail(i))))
-  XSPerfAccumulate("wpu_pred_fail", PopCount((0 until nPorts).map(i => s1_lookup_valid(i) && s1_pred_fail(i))))
-  XSPerfAccumulate("wpu_pred_miss", PopCount((0 until nPorts).map(i => s1_lookup_valid(i) && !s1_pred_way_en(i).orR)))
-  XSPerfAccumulate("wpu_real_miss", PopCount((0 until nPorts).map(i => s1_lookup_valid(i) && !io.lookup_upd(i).bits.s1_real_way_en.orR)))
+  XSPerfAccumulate("wpu_pred_total", PopCount((0 until nPorts).map(i => RegNext(io.req(i).valid) && s1_lookup_valid(i))))
+  XSPerfAccumulate("wpu_pred_succ", PopCount((0 until nPorts).map(i => RegNext(io.req(i).valid) && s1_lookup_valid(i) && !s1_pred_fail(i))))
+  XSPerfAccumulate("wpu_pred_fail", PopCount((0 until nPorts).map(i => RegNext(io.req(i).valid) && s1_lookup_valid(i) && s1_pred_fail(i))))
+  XSPerfAccumulate("wpu_pred_miss", PopCount((0 until nPorts).map(i => RegNext(io.req(i).valid) && s1_lookup_valid(i) && !s1_pred_way_en(i).orR)))
+  XSPerfAccumulate("wpu_real_miss", PopCount((0 until nPorts).map(i => RegNext(io.req(i).valid) && s1_lookup_valid(i) && !io.lookup_upd(i).bits.s1_real_way_en.orR)))
   // pred component
   XSPerfAccumulate("wpu_pred_replayCarry", PopCount((0 until nPorts).map(i => io.req(i).valid && io.req(i).bits.replayCarry.valid)))
   if(!dwpuParam.enCfPred){
@@ -225,11 +225,11 @@ class ICacheWpuWrapper (nPorts: Int) (implicit p:Parameters) extends WPUModule w
   // wpu.io.updTagwrite.head.vaddr := io.tagwrite_upd.head.bits.vaddr
   // wpu.io.updTagwrite.head.way_en := io.tagwrite_upd.head.bits.s1_real_way_en
 
-  XSPerfAccumulate("wpu_pred_total", PopCount(io.lookup_upd.map(x => RegNext(x.valid))))
-  XSPerfAccumulate("wpu_pred_succ",  PopCount(io.lookup_upd.zipWithIndex.map{case(x, i) => RegNext(x.valid) && !s1_pred_fail(i)}))
-  XSPerfAccumulate("wpu_pred_fail",  PopCount(io.lookup_upd.zipWithIndex.map{case(x, i) => RegNext(x.valid) && s1_pred_fail(i)}))
-  XSPerfAccumulate("wpu_pred_miss",  PopCount(io.lookup_upd.zipWithIndex.map{case(x, i) => RegNext(x.valid) && !RegNext(s0_pred_way_en(i)).orR}))
-  XSPerfAccumulate("wpu_real_miss",  PopCount(io.lookup_upd.zipWithIndex.map{case(x, i) => RegNext(x.valid) && !RegNext(s1_real_way_en(i)).orR}))
+  XSPerfAccumulate("wpu_pred_total", PopCount((0 until nPorts).map{i => RegNext(io.req(i).valid) && io.lookup_upd(i).valid}))
+  XSPerfAccumulate("wpu_pred_succ",  PopCount((0 until nPorts).map{i => RegNext(io.req(i).valid) && io.lookup_upd(i).valid && !s1_pred_fail(i)}))
+  XSPerfAccumulate("wpu_pred_fail",  PopCount((0 until nPorts).map{i => RegNext(io.req(i).valid) && io.lookup_upd(i).valid && s1_pred_fail(i)}))
+  XSPerfAccumulate("wpu_pred_miss",  PopCount((0 until nPorts).map{i => RegNext(io.req(i).valid) && io.lookup_upd(i).valid && !RegNext(s0_pred_way_en(i)).orR}))
+  XSPerfAccumulate("wpu_real_miss",  PopCount((0 until nPorts).map{i => RegNext(io.req(i).valid) && io.lookup_upd(i).valid && !RegNext(s1_real_way_en(i)).orR}))
 }
 
 /** IdealWPU:

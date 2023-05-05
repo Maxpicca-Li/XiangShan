@@ -364,7 +364,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     reToMeta.valid := false.B
     reToMeta.bits := DontCare
   }
-  XSPerfAccumulate("wpu_pred_total", PopCount(iwpu.io.req.map(_.valid)))
+  XSPerfAccumulate("wpu_pred_total", PopCount((0 until PortNumber).map(i => RegNext(iwpu.io.req(i).valid) && iwpu.io.lookup_upd(i).valid)))
   XSPerfAccumulate("count_first_send", PopCount(Seq(s1_valid, s1_valid && s1_double_line)))
   XSPerfAccumulate("count_second_send", replay_read_valid)
   XSPerfAccumulate("resend_block", !s1_resend_can_go)

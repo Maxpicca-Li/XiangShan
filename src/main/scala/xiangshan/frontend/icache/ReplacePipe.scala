@@ -204,7 +204,7 @@ class ICacheReplacePipe(implicit p: Parameters) extends ICacheModule{
     reToMeta.valid := false.B
     reToMeta.bits := DontCare
   }
-  XSPerfAccumulate("wpu_pred_total", iwpu.io.req(0).valid)
+  XSPerfAccumulate("wpu_pred_total", RegNext(iwpu.io.req(0).valid) && iwpu.io.lookup_upd(0).valid)
   XSPerfAccumulate("count_first_send", r1_valid && r1_req.isProbe)
   XSPerfAccumulate("count_second_send", replay_read_valid)
   XSPerfAccumulate("resend_block", !r1_resend_can_go)
