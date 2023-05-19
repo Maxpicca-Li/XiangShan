@@ -28,7 +28,7 @@ import xiangshan.cache._
 import xiangshan.frontend.FtqPtr
 import xiangshan.ExceptionNO._
 import chisel3.ExcitingUtils
-import xiangshan.cache.dcache.ReplayCarry
+import xiangshan.cache.wpu.ReplayCarry
 
 class LqPtr(implicit p: Parameters) extends CircularQueuePtr[LqPtr](
   p => p(XSCoreParamsKey).LoadQueueSize
@@ -136,7 +136,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   println("LoadQueue: size:" + LoadQueueSize)
 
   val uop = Reg(Vec(LoadQueueSize, new MicroOp))
-  val replayCarryReg = RegInit(VecInit(List.fill(LoadQueueSize)(ReplayCarry(0.U, false.B))))
+  val replayCarryReg = RegInit(VecInit(List.fill(LoadQueueSize)(ReplayCarry.init(nWays))))
   // val data = Reg(Vec(LoadQueueSize, new LsRobEntry))
   val dataModule = Module(new LoadQueueDataWrapper(LoadQueueSize, wbNumWrite = LoadPipelineWidth))
   dataModule.io := DontCare
@@ -527,7 +527,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
       ld_ld_check_ok(idx) := io.replayFast(i).ld_ld_check_ok
       st_ld_check_ok(idx) := io.replayFast(i).st_ld_check_ok
       cache_bank_no_conflict(idx) := io.replayFast(i).cache_bank_no_conflict
-
+      replayCarryReg(idx) := io.replayFast(i).replayCarry
       // update tlbReqFirstTime
       uop(idx).debugInfo := io.replayFast(i).debug
 
@@ -944,6 +944,7 @@ def detectRollback(i: Int) = {
 
   dataModule.io.uncache.raddr := deqPtrExtNext.value
 
+  io.uncache.req.bits := DontCare
   io.uncache.req.bits.cmd  := MemoryOpConstants.M_XRD
   io.uncache.req.bits.addr := dataModule.io.uncache.rdata.paddr
   io.uncache.req.bits.data := DontCare

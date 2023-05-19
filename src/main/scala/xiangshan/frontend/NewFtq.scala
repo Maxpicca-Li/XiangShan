@@ -557,7 +557,7 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
   val mispredict_vec = Reg(Vec(FtqSize, Vec(PredictWidth, Bool())))
   val pred_stage = Reg(Vec(FtqSize, UInt(2.W)))
 
-  val c_invalid :: c_valid :: c_commited :: c_flushed :: Nil = Enum(4)
+  val c_invalid :: c_valid :: c_commited :: Nil = Enum(3)
   val commitStateQueue = RegInit(VecInit(Seq.fill(FtqSize) {
     VecInit(Seq.fill(PredictWidth)(c_invalid))
   }))
@@ -698,7 +698,8 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
 
   val copied_ifu_plus1_to_send = VecInit(Seq.fill(copyNum)(RegNext(entry_fetch_status(ifuPtrPlus1.value) === f_to_send) || RegNext(last_cycle_bpu_in && bpu_in_bypass_ptr === (ifuPtrPlus1))))
   val copied_ifu_ptr_to_send   = VecInit(Seq.fill(copyNum)(RegNext(entry_fetch_status(ifuPtr.value) === f_to_send) || RegNext(last_cycle_bpu_in && bpu_in_bypass_ptr === ifuPtr)))
-  
+
+  // TODO: PC wpu prediction
   for(i <- 0 until copyNum){
     when(copied_last_cycle_bpu_in(i) && copied_bpu_in_bypass_ptr(i) === copied_ifu_ptr(i)){
       toICachePcBundle(i) := copied_bpu_in_bypass_buf(i)
@@ -994,7 +995,7 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
     when (RegNext(notIfu)) {
       commitStateQueue(RegNext(idx.value)).zipWithIndex.foreach({ case (s, i) =>
         when(i.U > RegNext(offset) || i.U === RegNext(offset) && RegNext(flushItSelf)){
-          s := c_flushed
+          s := c_invalid
         }
       })
     }
@@ -1034,17 +1035,14 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
   val may_have_stall_from_bpu = Wire(Bool())
   val bpu_ftb_update_stall = RegInit(0.U(2.W)) // 2-cycle stall, so we need 3 states
   may_have_stall_from_bpu := bpu_ftb_update_stall =/= 0.U
-  val canCommit = !may_have_stall_from_bpu &&
+  val canCommit = commPtr =/= ifuWbPtr && !may_have_stall_from_bpu &&
     Cat(commitStateQueue(commPtr.value).map(s => {
-      s === c_invalid || s === c_flushed || s === c_commited
-    })).andR() &&
-    !(Cat(commitStateQueue(commPtr.value).map(s => {
-      s === c_invalid
-    })).andR())
+      s === c_invalid || s === c_commited
+    })).andR()
 
   val mmioReadPtr = io.mmioCommitRead.mmioFtqPtr
   val mmioLastCommit = isBefore(commPtr, mmioReadPtr) && (isAfter(ifuPtr,mmioReadPtr)  ||  mmioReadPtr ===   ifuPtr) &&
-                       Cat(commitStateQueue(mmioReadPtr.value).map(s => { s === c_invalid || s === c_flushed || s === c_commited})).andR()
+                       Cat(commitStateQueue(mmioReadPtr.value).map(s => { s === c_invalid || s === c_commited})).andR()
   io.mmioCommitRead.mmioLastCommit := RegNext(mmioLastCommit)
 
   // commit reads
@@ -1222,7 +1220,8 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
 
   io.bpuInfo.bpRight := PopCount(mbpRights)
   io.bpuInfo.bpWrong := PopCount(mbpWrongs)
-  
+
+  val isWriteFTQTable = WireInit(Constantin.createRecord("isWriteFTQTable" + p(XSCoreParamsKey).HartId.toString))
   val ftqBranchTraceDB = ChiselDB.createTable("FTQTable" + p(XSCoreParamsKey).HartId.toString, new FtqDebugBundle)
   // Cfi Info
   for (i <- 0 until PredictWidth) {
@@ -1259,7 +1258,7 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
 
     ftqBranchTraceDB.log(
       data = logbundle /* hardware of type T */,
-      en = v && do_commit && isCfi,
+      en = isWriteFTQTable.orR && v && do_commit && isCfi,
       site = "FTQ" + p(XSCoreParamsKey).HartId.toString,
       clock = clock,
       reset = reset

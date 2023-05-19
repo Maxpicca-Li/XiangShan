@@ -20,6 +20,7 @@ import chipsalliance.rocketchip.config.Parameters
 import chisel3._
 import chisel3.util._
 import utility.SRAMTemplate
+import utils.XSPerfAccumulate
 import xiangshan.cache.CacheInstrucion._
 
 class TagReadReq(implicit p: Parameters) extends DCacheBundle {
@@ -28,6 +29,7 @@ class TagReadReq(implicit p: Parameters) extends DCacheBundle {
 }
 
 class TagWriteReq(implicit p: Parameters) extends TagReadReq {
+  val vaddr = UInt(vtagBits.W)
   val tag = UInt(tagBits.W)
 }
 
@@ -88,6 +90,7 @@ class TagArray(implicit p: Parameters) extends DCacheModule {
   tag_array.io.r.req.valid := ren
   tag_array.io.r.req.bits.apply(setIdx = io.read.bits.idx)
   io.resp := tag_array.io.r.resp.data
+  XSPerfAccumulate("part_tag_read_counter", tag_array.io.r.req.valid)
 
   val ecc_ren = io.ecc_read.fire()
   ecc_array.io.r.req.valid := ecc_ren
@@ -107,8 +110,8 @@ class DuplicatedTagArray(readPorts: Int)(implicit p: Parameters) extends DCacheM
     val write = Flipped(DecoupledIO(new TagWriteReq))
     // customized cache op port
     val cacheOp = Flipped(new L1CacheInnerOpIO)
-    val cacheOp_req_dup = Vec(11, Flipped(Valid(new CacheCtrlReqInfo)))
-    val cacheOp_req_bits_opCode_dup = Input(Vec(11, UInt(XLEN.W)))
+    val cacheOp_req_dup = Vec(DCacheDupNum, Flipped(Valid(new CacheCtrlReqInfo)))
+    val cacheOp_req_bits_opCode_dup = Input(Vec(DCacheDupNum, UInt(XLEN.W)))
   })
 
   val array = Seq.fill(readPorts) { Module(new TagArray) }
@@ -118,6 +121,7 @@ class DuplicatedTagArray(readPorts: Int)(implicit p: Parameters) extends DCacheM
     encTag(encTagBits - 1, tagBits)
   }
 
+  val tag_read_oh = WireInit(VecInit(Seq.fill(readPorts)(0.U(XLEN.W))))
   for (i <- 0 until readPorts) {
     // normal read / write
     array(i).io.write.valid := io.write.valid
@@ -136,122 +140,64 @@ class DuplicatedTagArray(readPorts: Int)(implicit p: Parameters) extends DCacheM
 //    array(i).io.ecc_write.valid := false.B
 //    array(i).io.ecc_write.bits := DontCare
     io.read(i).ready := array(i).io.read.ready && array(i).io.ecc_read.ready
+    tag_read_oh(i) := PopCount(array(i).io.read.fire)
   }
+  XSPerfAccumulate("tag_read_counter", tag_read_oh.reduce(_ + _))
   io.write.ready := true.B
 
-  // deal with customized cache op
   require(nWays <= 32)
   io.cacheOp.resp.bits := DontCare
-  val cacheOpShouldResp = WireInit(false.B) 
-
-  when (io.cacheOp.req.valid && isReadTag(io.cacheOp.req.bits.opCode)){
-    for (i <- 0 until (readPorts / 3)) {
-      array(i).io.read.valid := true.B
-      array(i).io.read.bits.idx := io.cacheOp.req.bits.index
-      array(i).io.read.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
+  val cacheOpShouldResp = WireInit(false.B)
+  // DCacheDupNum is 16
+  // vec: the dupIdx for every bank and every group
+  val rdata_dup_vec = Seq(0, 1, 2)
+  val rdataEcc_dup_vec = Seq(3, 4, 5)
+  val wdata_dup_vec = Seq(6, 7, 8)
+  val wdataEcc_dup_vec = Seq(9, 10, 11)
+  for(dupIdx <- rdata_dup_vec) {
+    for(idx <- 0 until readPorts){
+      when(io.cacheOp_req_dup(dupIdx).valid && isReadTag(io.cacheOp_req_bits_opCode_dup(dupIdx))) {
+        array(idx).io.read.valid := true.B
+        array(idx).io.read.bits.idx := io.cacheOp.req.bits.index
+        array(idx).io.read.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
+        cacheOpShouldResp := true.B
+      }
     }
-    cacheOpShouldResp := true.B
   }
-  when (io.cacheOp_req_dup(0).valid && isReadTagECC(io.cacheOp_req_bits_opCode_dup(0))) {
-    for (i <- 0 until (readPorts / 3)) {
-      array(i).io.ecc_read.valid := true.B
-      array(i).io.ecc_read.bits.idx := io.cacheOp.req.bits.index
-      array(i).io.ecc_read.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
+  for (dupIdx <- rdataEcc_dup_vec) {
+    for (idx <- 0 until readPorts) {
+      when(io.cacheOp_req_dup(dupIdx).valid && isReadTagECC(io.cacheOp_req_bits_opCode_dup(dupIdx))) {
+        array(idx).io.ecc_read.valid := true.B
+        array(idx).io.ecc_read.bits.idx := io.cacheOp.req.bits.index
+        array(idx).io.ecc_read.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
+        cacheOpShouldResp := true.B
+      }
     }
-    cacheOpShouldResp := true.B
   }
-  when (io.cacheOp_req_dup(1).valid && isWriteTag(io.cacheOp_req_bits_opCode_dup(1))){
-    for (i <- 0 until (readPorts / 3)) {
-      array(i).io.write.valid := true.B
-      array(i).io.write.bits.idx := io.cacheOp.req.bits.index
-      array(i).io.write.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
-      array(i).io.write.bits.tag := io.cacheOp.req.bits.write_tag_low
+  for (dupIdx <- wdata_dup_vec) {
+    for (idx <- 0 until readPorts) {
+      when(io.cacheOp_req_dup(dupIdx).valid && isWriteTag(io.cacheOp_req_bits_opCode_dup(dupIdx))) {
+        array(idx).io.write.valid := true.B
+        array(idx).io.write.bits.idx := io.cacheOp.req.bits.index
+        array(idx).io.write.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
+        array(idx).io.write.bits.tag := io.cacheOp.req.bits.write_tag_low
+        cacheOpShouldResp := true.B
+      }
     }
-    cacheOpShouldResp := true.B
   }
-  when(io.cacheOp_req_dup(2).valid && isWriteTagECC(io.cacheOp_req_bits_opCode_dup(2))){
-    for (i <- 0 until (readPorts / 3)) {
-      array(i).io.ecc_write.valid := true.B
-      array(i).io.ecc_write.bits.idx := io.cacheOp.req.bits.index
-      array(i).io.ecc_write.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
-      array(i).io.ecc_write.bits.ecc := io.cacheOp.req.bits.write_tag_ecc
+  for (dupIdx <- wdataEcc_dup_vec) {
+    for (idx <- 0 until readPorts) {
+      when(io.cacheOp_req_dup(dupIdx).valid && isWriteTagECC(io.cacheOp_req_bits_opCode_dup(dupIdx))) {
+        array(idx).io.ecc_write.valid := true.B
+        array(idx).io.ecc_write.bits.idx := io.cacheOp.req.bits.index
+        array(idx).io.ecc_write.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
+        array(idx).io.ecc_write.bits.ecc := io.cacheOp.req.bits.write_tag_ecc
+        cacheOpShouldResp := true.B
+      }
     }
-    cacheOpShouldResp := true.B
-  }
-  
-
-  when (io.cacheOp_req_dup(3).valid && isReadTag(io.cacheOp_req_bits_opCode_dup(3))){
-    for (i <- (readPorts / 3) until ((readPorts / 3) * 2)) {
-      array(i).io.read.valid := true.B
-      array(i).io.read.bits.idx := io.cacheOp.req.bits.index
-      array(i).io.read.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
-    }
-    cacheOpShouldResp := true.B
-  }
-  when (io.cacheOp_req_dup(4).valid && isReadTagECC(io.cacheOp_req_bits_opCode_dup(4))) {
-    for (i <- (readPorts / 3) until ((readPorts / 3) * 2)) {
-      array(i).io.ecc_read.valid := true.B
-      array(i).io.ecc_read.bits.idx := io.cacheOp.req.bits.index
-      array(i).io.ecc_read.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
-    }
-    cacheOpShouldResp := true.B
-  }
-  when (io.cacheOp_req_dup(5).valid && isWriteTag(io.cacheOp_req_bits_opCode_dup(5))){
-    for (i <- (readPorts / 3) until ((readPorts / 3) * 2)) {
-      array(i).io.write.valid := true.B
-      array(i).io.write.bits.idx := io.cacheOp.req.bits.index
-      array(i).io.write.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
-      array(i).io.write.bits.tag := io.cacheOp.req.bits.write_tag_low
-    }
-    cacheOpShouldResp := true.B
-  }
-  when(io.cacheOp_req_dup(6).valid && isWriteTagECC(io.cacheOp_req_bits_opCode_dup(6))){
-    for (i <- (readPorts / 3) until ((readPorts / 3) * 2)) {
-      array(i).io.ecc_write.valid := true.B
-      array(i).io.ecc_write.bits.idx := io.cacheOp.req.bits.index
-      array(i).io.ecc_write.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
-      array(i).io.ecc_write.bits.ecc := io.cacheOp.req.bits.write_tag_ecc
-    }
-    cacheOpShouldResp := true.B
-  }
-
-  when (io.cacheOp_req_dup(7).valid && isReadTag(io.cacheOp_req_bits_opCode_dup(7))){
-    for (i <- ((readPorts / 3) * 2) until readPorts) {
-      array(i).io.read.valid := true.B
-      array(i).io.read.bits.idx := io.cacheOp.req.bits.index
-      array(i).io.read.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
-    }
-    cacheOpShouldResp := true.B
-  }
-  when (io.cacheOp_req_dup(8).valid && isReadTagECC(io.cacheOp_req_bits_opCode_dup(8))) {
-    for (i <- ((readPorts / 3) * 2) until readPorts) {
-      array(i).io.ecc_read.valid := true.B
-      array(i).io.ecc_read.bits.idx := io.cacheOp.req.bits.index
-      array(i).io.ecc_read.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
-    }
-    cacheOpShouldResp := true.B
-  }
-  when (io.cacheOp_req_dup(9).valid && isWriteTag(io.cacheOp_req_bits_opCode_dup(9))){
-    for (i <- ((readPorts / 3) * 2) until readPorts) {
-      array(i).io.write.valid := true.B
-      array(i).io.write.bits.idx := io.cacheOp.req.bits.index
-      array(i).io.write.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
-      array(i).io.write.bits.tag := io.cacheOp.req.bits.write_tag_low
-    }
-    cacheOpShouldResp := true.B
-  }
-  when(io.cacheOp_req_dup(10).valid && isWriteTagECC(io.cacheOp_req_bits_opCode_dup(10))){
-    for (i <- ((readPorts / 3) * 2) until readPorts) {
-      array(i).io.ecc_write.valid := true.B
-      array(i).io.ecc_write.bits.idx := io.cacheOp.req.bits.index
-      array(i).io.ecc_write.bits.way_en := UIntToOH(io.cacheOp.req.bits.wayNum(4, 0))
-      array(i).io.ecc_write.bits.ecc := io.cacheOp.req.bits.write_tag_ecc
-    }
-    cacheOpShouldResp := true.B
   }
 
   io.cacheOp.resp.valid := RegNext(io.cacheOp.req.valid && cacheOpShouldResp)
   io.cacheOp.resp.bits.read_tag_low := Mux(io.cacheOp.resp.valid, array(0).io.resp(RegNext(io.cacheOp.req.bits.wayNum)), 0.U)
   io.cacheOp.resp.bits.read_tag_ecc := Mux(io.cacheOp.resp.valid, array(0).io.ecc_resp(RegNext(io.cacheOp.req.bits.wayNum)), 0.U)
-  // TODO: deal with duplicated array
 }
