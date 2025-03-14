@@ -162,9 +162,10 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     val vecFeedback = Vec(VecLoadPipelineWidth, Flipped(ValidIO(new FeedbackToLsqIO)))
     val enq = new LqEnqIO
     val ldu = new Bundle() {
-        val stld_nuke_query = Vec(LoadPipelineWidth, Flipped(new LoadNukeQueryIO)) // from load_s2
-        val ldld_nuke_query = Vec(LoadPipelineWidth, Flipped(new LoadNukeQueryIO)) // from load_s2
-        val ldin         = Vec(LoadPipelineWidth, Flipped(Decoupled(new LqWriteBundle))) // from load_s3
+      val stld_nuke_query = Vec(LoadPipelineWidth, Flipped(new LoadNukeQueryIO)) // from load_s2
+      val ldld_nuke_query = Vec(LoadPipelineWidth, Flipped(new LoadNukeQueryIO)) // from load_s2
+      val uncache_buf = Vec(LoadPipelineWidth, Flipped(Decoupled(new LqWriteBundle))) // from load_s3
+      val ldin         = Vec(LoadPipelineWidth, Flipped(Decoupled(new LqWriteBundle))) // from load_s3
     }
     val sta = new Bundle() {
       val storeAddrIn = Vec(StorePipelineWidth, Flipped(Valid(new LsPipelineBundle))) // from store_s1
@@ -279,25 +280,20 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   exceptionBuffer.io.req(LoadPipelineWidth + VecLoadPipelineWidth).bits.vaNeedExt := true.B
 
   loadQueueReplay.io.loadMisalignFull := io.loadMisalignFull
+  loadQueueReplay.io.loadUncacheBufferFull := uncacheBuffer.io.full
 
   io.exceptionAddr <> exceptionBuffer.io.exceptionAddr
 
   /**
    * Load uncache buffer
    */
+  uncacheBuffer.io.req <> io.ldu.uncache_buf
   uncacheBuffer.io.redirect <> io.redirect
   uncacheBuffer.io.mmioOut <> io.ldout
   uncacheBuffer.io.ncOut <> io.ncOut
   uncacheBuffer.io.mmioRawData <> io.ld_raw_data
   uncacheBuffer.io.rob <> io.rob
   uncacheBuffer.io.uncache <> io.uncache
-
-  for ((buff, w) <- uncacheBuffer.io.req.zipWithIndex) {
-    // from load_s3
-    val ldinBits = io.ldu.ldin(w).bits
-    buff.valid := io.ldu.ldin(w).valid && (ldinBits.nc || ldinBits.mmio) && !ldinBits.rep_info.need_rep && !ldinBits.nc_with_data
-    buff.bits := ldinBits
-  }
 
   io.uncache.resp.ready := true.B
 

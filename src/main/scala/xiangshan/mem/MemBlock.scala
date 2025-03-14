@@ -939,6 +939,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
 
     // passdown to lsq (load s2)
     lsq.io.ldu.ldin(i) <> loadUnits(i).io.lsq.ldin
+    lsq.io.ldu.uncache_buf(i) <> loadUnits(i).io.lsq.uncache_buf
     if (i == UncacheWBPort) {
       lsq.io.ldout(i) <> loadUnits(i).io.lsq.uncache
     } else {

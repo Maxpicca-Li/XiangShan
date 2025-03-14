@@ -279,6 +279,7 @@ class LoadQueueUncache(implicit p: Parameters) extends XSModule
     val redirect = Flipped(Valid(new Redirect))
     // mmio commit
     val rob = Flipped(new RobLsqIO)
+    val full = Bool()
 
     /* transaction */
     // enqueue: from ldu s3
@@ -336,56 +337,60 @@ class LoadQueueUncache(implicit p: Parameters) extends XSModule
     io.ncOut(w).bits := DontCare
   }
 
+  io.full := freeList.io.validCount === LoadUncacheBufferSize.U
 
   /******************************************************************
    * Enqueue
-   *
-   * s1: hold
-   * s2: confirm enqueue and write entry
-   *    valid: no redirect, no exception, no replay, is mmio/nc
-   *    ready: freelist can allocate
+   * 
+   * old version:
+   *    s1: hold (for better timing)
+   *    s2: confirm enqueue and write entry
+   *       valid: no redirect, no exception, no replay, is mmio/nc
+   *       ready: freelist can allocate
+   * 
+   * new version:
+   *    s1: allocate
+   *    s2: confirm enqueue and write entry
    ******************************************************************/
-
-  val s1_sortedVec = HwSort(VecInit(io.req.map { case x => DataWithPtr(x.valid, x.bits, x.bits.uop.robIdx) }))
-  val s1_req = VecInit(s1_sortedVec.map(_.bits))
-  val s1_valid = VecInit(s1_sortedVec.map(_.valid))
-  val s2_enqueue = Wire(Vec(LoadPipelineWidth, Bool()))
-  io.req.zipWithIndex.foreach{ case (r, i) =>
-    r.ready := true.B
+  
+  val s1_hasException = io.req.map(x => ExceptionNO.selectByFu(x.bits.uop.exceptionVec, LduCfg).asUInt.orR)
+  val s1_needReplay = io.req.map(_.bits.rep_info.need_rep)
+  val s1_canEnqueue = io.req.zipWithIndex.map{ case(x, w) =>
+    x.valid && (x.bits.mmio || x.bits.nc) &&
+    !s1_hasException(w) && !s1_needReplay(w) &&
+    !x.bits.uop.robIdx.needFlush(io.redirect)
   }
 
-  // s2: enqueue
-  val s2_req = (0 until LoadPipelineWidth).map(i => {RegEnable(s1_req(i), s1_valid(i))})
-  val s2_valid = (0 until LoadPipelineWidth).map(i => {
-    RegNext(s1_valid(i)) &&
-    !s2_req(i).uop.robIdx.needFlush(RegNext(io.redirect)) &&
-    !s2_req(i).uop.robIdx.needFlush(io.redirect)
-  })
-  val s2_has_exception = s2_req.map(x => ExceptionNO.selectByFu(x.uop.exceptionVec, LduCfg).asUInt.orR)
-  val s2_need_replay = s2_req.map(_.rep_info.need_rep)
-
-  for (w <- 0 until LoadPipelineWidth) {
-    s2_enqueue(w) := s2_valid(w) && !s2_has_exception(w) && !s2_need_replay(w) && (s2_req(w).mmio || s2_req(w).nc)
-  }
-
+  val s1_enqValidVec = Wire(Vec(LoadPipelineWidth, Bool()))
+  val s1_enqIndexVec = Wire(Vec(LoadPipelineWidth, UInt()))
+  val s1_reqNeedRollback = Wire(Vec(LoadPipelineWidth, Bool()))
+  val s1_req = Wire(Vec(LoadPipelineWidth, new LqWriteBundle()))
+  val s2_reqNeedRollback = Wire(Vec(LoadPipelineWidth, Bool()))
   val s2_enqValidVec = Wire(Vec(LoadPipelineWidth, Bool()))
   val s2_enqIndexVec = Wire(Vec(LoadPipelineWidth, UInt()))
+  val s2_req = Wire(Vec(LoadPipelineWidth, new LqWriteBundle()))
+  for ((req, w) <- io.req.zipWithIndex) {
+    s1_req(w) := req.bits
 
-  for (w <- 0 until LoadPipelineWidth) {
+    // preAllocate
     freeList.io.allocateReq(w) := true.B
-  }
 
-  // freeList real-allocate
-  for (w <- 0 until LoadPipelineWidth) {
-    freeList.io.doAllocate(w) := s2_enqValidVec(w)
-  }
+    // allocate judge
+    val offset = PopCount(s1_canEnqueue.take(w))
+    s1_enqValidVec(w) := s1_canEnqueue(w) && freeList.io.canAllocate(offset)
+    s1_enqIndexVec(w) := freeList.io.allocateSlot(offset)
 
-  for (w <- 0 until LoadPipelineWidth) {
-    val offset = PopCount(s2_enqueue.take(w))
-    s2_enqValidVec(w) := s2_enqueue(w) && freeList.io.canAllocate(offset)
-    s2_enqIndexVec(w) := freeList.io.allocateSlot(offset)
-  }
+    req.ready := !s1_canEnqueue(w) || freeList.io.canAllocate(offset) || req.bits.mmio
+    s1_reqNeedRollback(w) := s1_canEnqueue(w) && !freeList.io.canAllocate(offset) && req.bits.mmio
+    freeList.io.doAllocate(w) := s1_enqValidVec(w)
 
+    // allocate
+    // @ next part
+    s2_reqNeedRollback(w) := RegNext(s1_reqNeedRollback(w))
+    s2_enqValidVec(w) := RegNext(s1_enqValidVec(w))
+    s2_enqIndexVec(w) := RegEnable(s1_enqIndexVec(w), s1_enqValidVec(w))
+    s2_req(w) := RegEnable(req.bits, s1_enqValidVec(w))
+  }
 
   /******************************************************************
    * Uncache Transaction
@@ -429,9 +434,9 @@ class LoadQueueUncache(implicit p: Parameters) extends XSModule
     case (e, i) =>
       // enqueue
       for (w <- 0 until LoadPipelineWidth) {
-        when (s2_enqValidVec(w) && (i.U === s2_enqIndexVec(w))) {
+        when (s1_enqValidVec(w) && (i.U === s1_enqIndexVec(w))) {
           e.io.req.valid := true.B
-          e.io.req.bits := s2_req(w)
+          e.io.req.bits := s1_req(w)
         }
       }
 
@@ -504,8 +509,8 @@ class LoadQueueUncache(implicit p: Parameters) extends XSModule
 
   // rob
   for (i <- 0 until LoadPipelineWidth) {
-    io.rob.mmio(i) := RegNext(s1_valid(i) && s1_req(i).mmio)
-    io.rob.uop(i) := RegEnable(s1_req(i).uop, s1_valid(i))
+    io.rob.mmio(i) := io.req(i).valid && io.req(i).bits.mmio
+    io.rob.uop(i) := io.req(i).bits.uop
   }
 
 
@@ -562,13 +567,10 @@ class LoadQueueUncache(implicit p: Parameters) extends XSModule
     )).andR))
     resultOnehot
   }
-  val reqNeedCheck = VecInit((0 until LoadPipelineWidth).map(w =>
-    s2_enqueue(w) && !s2_enqValidVec(w)
-  ))
-  val reqSelUops = VecInit(s2_req.map(_.uop))
+  val reqSelUops = VecInit(s1_req.map(_.uop))
   val allRedirect = (0 until LoadPipelineWidth).map(i => {
     val redirect = Wire(Valid(new Redirect))
-    redirect.valid := reqNeedCheck(i)
+    redirect.valid := s1_reqNeedRollback(i)
     redirect.bits             := DontCare
     redirect.bits.isRVC       := reqSelUops(i).preDecodeInfo.isRVC
     redirect.bits.robIdx      := reqSelUops(i).robIdx
@@ -602,11 +604,12 @@ class LoadQueueUncache(implicit p: Parameters) extends XSModule
   QueuePerf(LoadUncacheBufferSize, validCount, !allowEnqueue)
 
   XSPerfAccumulate("mmio_uncache_req", io.uncache.req.fire && !io.uncache.req.bits.nc)
-  XSPerfAccumulate("mmio_writeback_success", io.mmioOut(0).fire)
-  XSPerfAccumulate("mmio_writeback_blocked", io.mmioOut(0).valid && !io.mmioOut(0).ready)
+  XSPerfAccumulate("mmio_writeback_success", PopCount(io.mmioOut.map(x => x.fire)))
+  XSPerfAccumulate("mmio_writeback_blocked", PopCount(io.mmioOut.map(x => x.valid && !x.ready)))
   XSPerfAccumulate("nc_uncache_req", io.uncache.req.fire && io.uncache.req.bits.nc)
-  XSPerfAccumulate("nc_writeback_success", io.ncOut(0).fire)
-  XSPerfAccumulate("nc_writeback_blocked", io.ncOut(0).valid && !io.ncOut(0).ready)
+  XSPerfAccumulate("nc_writeback_success", PopCount(io.ncOut.map(x => x.fire)))
+  XSPerfAccumulate("nc_writeback_blocked", PopCount(io.ncOut.map(x => x.valid && !x.ready)))
+  XSPerfAccumulate("uncache_replay_count", PopCount(io.req.map(x => x.valid && !x.ready)))
   XSPerfAccumulate("uncache_full_rollback", io.rollback.valid)
 
   val perfEvents: Seq[(String, UInt)] = Seq(
@@ -616,6 +619,7 @@ class LoadQueueUncache(implicit p: Parameters) extends XSModule
     ("nc_uncache_req", io.uncache.req.fire && io.uncache.req.bits.nc),
     ("nc_writeback_success", io.ncOut(0).fire),
     ("nc_writeback_blocked", io.ncOut(0).valid && !io.ncOut(0).ready),
+    ("uncache_replay_count", PopCount(io.req.map(x => x.valid && !x.ready))),
     ("uncache_full_rollback", io.rollback.valid)
   )
   // end
